@@ -6,7 +6,7 @@ package cb
 import java.util.{TimerTask, Timer}
 import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicLong, AtomicBoolean}
 import scala.util.control.NoStackTrace
-import java.util.concurrent.{ Callable, CopyOnWriteArrayList }
+import java.util.concurrent.{ConcurrentHashMap, CopyOnWriteArrayList}
 import scala.concurrent.{ ExecutionContext, Future, Promise, Await }
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
@@ -17,6 +17,8 @@ import scala.util.Success
  */
 object CircuitBreaker {
 
+  private val cache = new ConcurrentHashMap[String, CircuitBreaker]()
+
   /**
    * Create a new CircuitBreaker.
    *
@@ -24,12 +26,20 @@ object CircuitBreaker {
    * in Future when using withCircuitBreaker. To use another ExecutionContext for the callbacks you can specify the
    * executor in the constructor.
    *
+   * @param name Unique key of circuit-breaker
    * @param maxFailures Maximum number of failures before opening the circuit
    * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
    * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
    */
-  def apply(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration): CircuitBreaker =
-    new CircuitBreaker(maxFailures, callTimeout, resetTimeout)
+  def apply(name: String, maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration): CircuitBreaker = {
+    val prevBreaker = cache.get(name)
+    if (prevBreaker != null) {
+      prevBreaker
+    } else {
+      val prev = cache.putIfAbsent(name, new CircuitBreaker(maxFailures, callTimeout, resetTimeout))
+      if (prev == null) cache.get(name) else prev
+    }
+  }
 }
 
 /**
@@ -255,7 +265,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
       bodyFuture.onComplete({
         case s: Success[_] if !deadline.isOverdue() ⇒ callSucceeds()
         case _                                      ⇒ callFails()
-      }) // TODO need to specify an execution context
+      })
       bodyFuture
     }
 
