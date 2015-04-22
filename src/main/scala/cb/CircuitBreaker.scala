@@ -112,7 +112,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
    * @param callback Handler to be invoked on state change
    * @return CircuitBreaker for fluent usage
    */
-  def onOpen(callback: ⇒ Unit): CircuitBreaker = onOpen(new Runnable { def run = callback })
+  def onOpen(callback: ⇒ Unit): CircuitBreaker = onOpen(new Runnable { def run() = callback })
 
   /**
    * Java API for onOpen
@@ -133,7 +133,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
    * @param callback Handler to be invoked on state change
    * @return CircuitBreaker for fluent usage
    */
-  def onHalfOpen(callback: ⇒ Unit): CircuitBreaker = onHalfOpen(new Runnable { def run = callback })
+  def onHalfOpen(callback: ⇒ Unit): CircuitBreaker = onHalfOpen(new Runnable { def run() = callback })
 
   /**
    * JavaAPI for onHalfOpen
@@ -154,7 +154,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
    * @param callback Handler to be invoked on state change
    * @return CircuitBreaker for fluent usage
    */
-  def onClose(callback: ⇒ Unit): CircuitBreaker = onClose(new Runnable { def run = callback })
+  def onClose(callback: ⇒ Unit): CircuitBreaker = onClose(new Runnable { def run() = callback })
 
   /**
    * JavaAPI for onClose
@@ -172,7 +172,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
    *
    * @return count
    */
-  private[akka] def currentFailureCount: Int = Closed.get
+  private[akka] def currentFailureCount: Int = Closed.numFailures
 
   /**
    * Implements consistent transition between states
@@ -300,7 +300,8 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
   /**
    * Concrete implementation of Closed state
    */
-  private object Closed extends AtomicInteger with State {
+  private object Closed extends State {
+    private val failureCount = new AtomicInteger(0)
 
     /**
      * Implementation of invoke, which simply attempts the call
@@ -316,7 +317,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      *
      * @return
      */
-    override def callSucceeds(): Unit = set(0)
+    override def callSucceeds(): Unit = failureCount.set(0)
 
     /**
      * On failed call, the failure count is incremented.  The count is checked against the configured maxFailures, and
@@ -324,27 +325,30 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      *
      * @return
      */
-    override def callFails(): Unit = if (incrementAndGet() == maxFailures) tripBreaker(Closed)
+    override def callFails(): Unit = if (failureCount.incrementAndGet() == maxFailures) tripBreaker(Closed)
 
     /**
      * On entry of this state, failure count is reset.
      *
      * @return
      */
-    override def _enter(): Unit = set(0)
+    override def _enter(): Unit = failureCount.set(0)
 
     /**
      * Override for more descriptive toString
      *
      * @return
      */
-    override def toString: String = "Closed with failure count = " + get()
+    override def toString: String = "Closed with failure count = " + failureCount.get()
+
+    def numFailures: Int = failureCount.get
   }
 
   /**
    * Concrete implementation of half-open state
    */
-  private object HalfOpen extends AtomicBoolean(true) with State {
+  private object HalfOpen extends State {
+    private val uninvoked = new AtomicBoolean(true)
 
     /**
      * Allows a single call through, during which all other callers fail-fast.  If the call fails, the breaker reopens.
@@ -355,7 +359,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      * @return Future containing result of protected call
      */
     override def invoke[T](body: ⇒ Future[T]): Future[T] =
-      if (compareAndSet(true, false)) callThrough(body) else Promise.failed[T](new CircuitBreakerOpenException(0.seconds)).future
+      if (uninvoked.compareAndSet(true, false)) callThrough(body) else Promise.failed[T](new CircuitBreakerOpenException(0.seconds)).future
 
     /**
      * Reset breaker on successful call.
@@ -376,20 +380,21 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      *
      * @return
      */
-    override def _enter(): Unit = set(true)
+    override def _enter(): Unit = uninvoked.set(true)
 
     /**
      * Override for more descriptive toString
      *
      * @return
      */
-    override def toString: String = "Half-Open currently testing call for success = " + get()
+    override def toString: String = "Half-Open currently testing call for success = " + uninvoked.get()
   }
 
   /**
    * Concrete implementation of Open state
    */
-  private object Open extends AtomicLong with State {
+  private object Open extends State {
+    private val openStartTime = new AtomicLong(0)
 
     /**
      * Fail-fast on any invocation
@@ -407,7 +412,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      * @return duration to when the breaker will attempt a reset by transitioning to half-open
      */
     private def remainingDuration(): FiniteDuration = {
-      val diff = System.nanoTime() - get
+      val diff = System.nanoTime() - openStartTime.get
       if (diff <= 0L) Duration.Zero
       else diff.nanos
     }
@@ -433,7 +438,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      * @return
      */
     override def _enter(): Unit = {
-      set(System.nanoTime())
+      openStartTime.set(System.nanoTime())
       new Scheduler(resetTimeout).start()
     }
 
