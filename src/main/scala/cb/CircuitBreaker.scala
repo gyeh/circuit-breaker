@@ -115,6 +115,11 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
       callTimeout)
 
   /**
+   * Manually force circuit breaker to transition to closed state.
+   */
+  def forceCloseState(): Unit = state.set(Closed)
+
+  /**
    * Adds a callback to execute when circuit breaker opens
    *
    * The callback is run in the [[scala.concurrent.ExecutionContext]] supplied in the constructor.
