@@ -5,6 +5,8 @@ package cb
 
 import java.util.{TimerTask, Timer}
 import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicLong, AtomicBoolean}
+import cb.CircuitBreakerCounters.HealthCounts
+
 import scala.util.control.NoStackTrace
 import java.util.concurrent.{ConcurrentHashMap, CopyOnWriteArrayList}
 import scala.concurrent.{ ExecutionContext, Future, Promise, Await }
@@ -27,16 +29,15 @@ object CircuitBreaker {
    * executor in the constructor.
    *
    * @param name Unique key of circuit-breaker
-   * @param maxFailures Maximum number of failures before opening the circuit
    * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
    * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
    */
-  def apply(name: String, maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration): CircuitBreaker = {
+  def apply(name: String, callTimeout: FiniteDuration, resetTimeout: FiniteDuration): CircuitBreaker = {
     val prevBreaker = cache.get(name)
     if (prevBreaker != null) {
       prevBreaker
     } else {
-      val prev = cache.putIfAbsent(name, new CircuitBreaker(maxFailures, callTimeout, resetTimeout))
+      val prev = cache.putIfAbsent(name, new CircuitBreaker(callTimeout, resetTimeout))
       if (prev == null) cache.get(name) else prev
     }
   }
@@ -55,12 +56,16 @@ object CircuitBreaker {
  * closed state.  If it fails, the circuit breaker will re-open to open state.  All calls beyond the first that
  * execute while the first is running will fail-fast with an exception.
  *
- * @param maxFailures Maximum number of failures before opening the circuit
  * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
  * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
  * @param executor [[scala.concurrent.ExecutionContext]] used for execution of state transition listeners
  */
-class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration)(implicit executor: ExecutionContext) {
+class CircuitBreaker(callTimeout: FiniteDuration,
+                     resetTimeout: FiniteDuration,
+                     requestVolumeThreshold: Long,
+                     errorPercentageThreshold: Int)(implicit executor: ExecutionContext) {
+
+  private val counters = new CircuitBreakerCounters()
 
   def this(executor: ExecutionContext, maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration) = {
     this(maxFailures, callTimeout, resetTimeout)(executor)
@@ -183,11 +188,11 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
   }
 
   /**
-   * Retrieves current failure count.
+   * Retrieves current failure count within last window
    *
    * @return count
    */
-  private[akka] def currentFailureCount: Int = Closed.numFailures
+  def currentFailureCount: Long = Closed.numFailuresInWindow
 
   /**
    * Implements consistent transition between states
@@ -316,7 +321,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
    * Concrete implementation of Closed state
    */
   private object Closed extends State {
-    private val failureCount = new AtomicInteger(0)
+    @volatile var lastSnapshot: Option[HealthCounts] = None
 
     /**
      * Implementation of invoke, which simply attempts the call
@@ -332,7 +337,7 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      *
      * @return
      */
-    override def callSucceeds(): Unit = failureCount.set(0)
+    override def callSucceeds(): Unit = counters.markSuccess()
 
     /**
      * On failed call, the failure count is incremented.  The count is checked against the configured maxFailures, and
@@ -340,23 +345,40 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
      *
      * @return
      */
-    override def callFails(): Unit = if (failureCount.incrementAndGet() == maxFailures) tripBreaker(Closed)
+    override def callFails(): Unit = {
+      counters.markFailure()
+
+      val snapshot = counters.getHealthCounts
+      if ((snapshot.totalCount >= requestVolumeThreshold) && (snapshot.errorPercentage >= errorPercentageThreshold)) {
+        tripBreaker(Closed)
+      }
+      lastSnapshot = Option(snapshot)
+    }
 
     /**
      * On entry of this state, failure count is reset.
      *
      * @return
      */
-    override def _enter(): Unit = failureCount.set(0)
+    override def _enter(): Unit = counters.resetCounter()
 
     /**
      * Override for more descriptive toString
      *
      * @return
      */
-    override def toString: String = "Closed with failure count = " + failureCount.get()
+    override def toString: String = {
+      s"Closed with failure count in last window = $numFailures"
+    }
 
-    def numFailures: Int = failureCount.get
+    def numFailuresInWindow: Long = numFailures
+
+    private def numFailures: Long = {
+      lastSnapshot match {
+        case Some(s) => s.errorCount
+        case None => 0
+      }
+    }
   }
 
   /**
@@ -469,10 +491,10 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
     val timer = new Timer()
 
     def start(): Unit = {
-      timer.schedule(new RemindTask(), duration.toMillis)
+      timer.schedule(new ResetTask(), duration.toMillis)
     }
 
-    private class RemindTask extends TimerTask {
+    private class ResetTask extends TimerTask {
       def run() {
         attemptReset()
         timer.cancel()
@@ -489,7 +511,6 @@ class CircuitBreaker(maxFailures: Int, callTimeout: FiniteDuration, resetTimeout
  *                          currently in half-open state.
  * @param message Defaults to "Circuit Breaker is open; calls are failing fast"
  */
-class CircuitBreakerOpenException(
-                                   val remainingDuration: FiniteDuration,
-                                   message: String = "Circuit Breaker is open; calls are failing fast")
+class CircuitBreakerOpenException(val remainingDuration: FiniteDuration,
+                                  message: String = "Circuit Breaker is open; calls are failing fast")
   extends RuntimeException(message) with NoStackTrace
