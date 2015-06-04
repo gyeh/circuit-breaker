@@ -4,8 +4,9 @@
 package cb
 
 import java.util.{TimerTask, Timer}
-import java.util.concurrent.atomic.{AtomicReference, AtomicInteger, AtomicLong, AtomicBoolean}
-import cb.CircuitBreakerCounters.HealthCounts
+import java.util.concurrent.atomic.{AtomicReference, AtomicLong, AtomicBoolean}
+import cb.CircuitBreaker.Configs
+import cb.CircuitBreakerMetrics.MetricSnapshot
 
 import scala.util.control.NoStackTrace
 import java.util.concurrent.{ConcurrentHashMap, CopyOnWriteArrayList}
@@ -19,6 +20,23 @@ import scala.util.Success
  */
 object CircuitBreaker {
 
+  /**
+   * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
+   * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
+   * @param errorPercentageThreshold Error threshold to trigger an open circuit-breaker
+   * @param requestVolumeThreshold Request volume prequisite to trigger an open circuit-breaker
+   * @param snapshotInterval Determines maximum age of a cached snapshot
+   * @param bucketWindowInterval Bucket window size in milliseconds.
+   * @param numberOfBuckets Number of active buckets within a rolling window.
+   */
+  case class Configs(callTimeout: FiniteDuration,
+                     resetTimeout: FiniteDuration,
+                     errorPercentageThreshold: Int,
+                     requestVolumeThreshold: Option[Long],
+                     snapshotInterval: Long,
+                     bucketWindowInterval: Int,
+                     numberOfBuckets: Int)
+
   private val cache = new ConcurrentHashMap[String, CircuitBreaker]()
 
   /**
@@ -29,15 +47,16 @@ object CircuitBreaker {
    * executor in the constructor.
    *
    * @param name Unique key of circuit-breaker
-   * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
-   * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
+   * @param configs Circuit-breaker configs
    */
-  def apply(name: String, callTimeout: FiniteDuration, resetTimeout: FiniteDuration): CircuitBreaker = {
+  def apply(name: String,
+            configs: Configs): CircuitBreaker = {
     val prevBreaker = cache.get(name)
     if (prevBreaker != null) {
       prevBreaker
     } else {
-      val prev = cache.putIfAbsent(name, new CircuitBreaker(callTimeout, resetTimeout))
+      val prev = cache.putIfAbsent(name,
+        new CircuitBreaker(configs))
       if (prev == null) cache.get(name) else prev
     }
   }
@@ -56,16 +75,15 @@ object CircuitBreaker {
  * closed state.  If it fails, the circuit breaker will re-open to open state.  All calls beyond the first that
  * execute while the first is running will fail-fast with an exception.
  *
- * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
- * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
+ * @param configs Circuit-breaker configs
  * @param executor [[scala.concurrent.ExecutionContext]] used for execution of state transition listeners
  */
-class CircuitBreaker(callTimeout: FiniteDuration,
-                     resetTimeout: FiniteDuration,
-                     requestVolumeThreshold: Long,
-                     errorPercentageThreshold: Int)(implicit executor: ExecutionContext) {
+class CircuitBreaker(configs: Configs)(implicit executor: ExecutionContext) {
 
-  private val counters = new CircuitBreakerCounters()
+  private val counters = new CircuitBreakerMetrics(
+    configs.snapshotInterval,
+    configs.bucketWindowInterval,
+    configs.numberOfBuckets)
 
   def this(executor: ExecutionContext, maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration) = {
     this(maxFailures, callTimeout, resetTimeout)(executor)
@@ -117,7 +135,7 @@ class CircuitBreaker(callTimeout: FiniteDuration,
   def withSyncCircuitBreaker[T](body: ⇒ T): T =
     Await.result(
       withCircuitBreaker(try Future.successful(body) catch { case NonFatal(t) ⇒ Future.failed(t) }),
-      callTimeout)
+      configs.callTimeout)
 
   /**
    * Manually force circuit breaker to transition to closed state.
@@ -270,7 +288,7 @@ class CircuitBreaker(callTimeout: FiniteDuration,
      * @return Future containing the result of the call
      */
     def callThrough[T](body: ⇒ Future[T]): Future[T] = {
-      val deadline = callTimeout.fromNow
+      val deadline = configs.callTimeout.fromNow
       val bodyFuture = try body catch { case NonFatal(t) ⇒ Future.failed(t) }
       bodyFuture.onComplete({
         case s: Success[_] if !deadline.isOverdue() ⇒ callSucceeds()
@@ -321,7 +339,7 @@ class CircuitBreaker(callTimeout: FiniteDuration,
    * Concrete implementation of Closed state
    */
   private object Closed extends State {
-    @volatile var lastSnapshot: Option[HealthCounts] = None
+    @volatile var lastSnapshot: Option[MetricSnapshot] = None
 
     /**
      * Implementation of invoke, which simply attempts the call
@@ -348,8 +366,9 @@ class CircuitBreaker(callTimeout: FiniteDuration,
     override def callFails(): Unit = {
       counters.markFailure()
 
-      val snapshot = counters.getHealthCounts
-      if ((snapshot.totalCount >= requestVolumeThreshold) && (snapshot.errorPercentage >= errorPercentageThreshold)) {
+      val snapshot = counters.getMetricSnapshot
+      if ((snapshot.totalCount >= configs.requestVolumeThreshold.getOrElse(-1L))
+        && (snapshot.errorPercentage >= configs.errorPercentageThreshold)) {
         tripBreaker(Closed)
       }
       lastSnapshot = Option(snapshot)
@@ -360,7 +379,7 @@ class CircuitBreaker(callTimeout: FiniteDuration,
      *
      * @return
      */
-    override def _enter(): Unit = counters.resetCounter()
+    override def _enter(): Unit = counters.reset()
 
     /**
      * Override for more descriptive toString
@@ -476,7 +495,7 @@ class CircuitBreaker(callTimeout: FiniteDuration,
      */
     override def _enter(): Unit = {
       openStartTime.set(System.nanoTime())
-      new Scheduler(resetTimeout).start()
+      new Scheduler(configs.resetTimeout).start()
     }
 
     /**
