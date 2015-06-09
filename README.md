@@ -1,8 +1,9 @@
 # Circuit-Breaker
 
 Derived from Akka's CircuitBreaker -- minus the Akka dependency with additional enhancements:
-* Uses an error percentage threshold over rolling time window to trigger an open state (instead of X number consecutive failures).
+* Uses an error percentage threshold over rolling time window to trigger an open state (instead of X number of consecutive failures).
 * Option to provide a request volume threshold as a prerequisite for open state.
+* A few minor API changes.
 
 ## Sample Usage
 

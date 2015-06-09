@@ -31,11 +31,11 @@ object CircuitBreaker {
    */
   case class Configs(callTimeout: FiniteDuration,
                      resetTimeout: FiniteDuration,
-                     errorPercentageThreshold: Int,
-                     requestVolumeThreshold: Option[Long],
+                     errorPercentageThreshold: Int = 90,
+                     requestVolumeThreshold: Option[Long] = None,
                      snapshotInterval: Long,
                      bucketWindowInterval: Int,
-                     numberOfBuckets: Int)
+                     numberOfBuckets: Int = 10)
 
   private val cache = new ConcurrentHashMap[String, CircuitBreaker]()
 
@@ -80,14 +80,10 @@ object CircuitBreaker {
  */
 class CircuitBreaker(configs: Configs)(implicit executor: ExecutionContext) {
 
-  private val counters = new CircuitBreakerMetrics(
+  private val metrics = new CircuitBreakerMetrics(
     configs.snapshotInterval,
     configs.bucketWindowInterval,
     configs.numberOfBuckets)
-
-  def this(executor: ExecutionContext, maxFailures: Int, callTimeout: FiniteDuration, resetTimeout: FiniteDuration) = {
-    this(maxFailures, callTimeout, resetTimeout)(executor)
-  }
 
   /**
    * Holds reference to current state of CircuitBreaker - *access only via helper methods*
@@ -355,7 +351,7 @@ class CircuitBreaker(configs: Configs)(implicit executor: ExecutionContext) {
      *
      * @return
      */
-    override def callSucceeds(): Unit = counters.markSuccess()
+    override def callSucceeds(): Unit = metrics.markSuccess()
 
     /**
      * On failed call, the failure count is incremented.  The count is checked against the configured maxFailures, and
@@ -364,9 +360,9 @@ class CircuitBreaker(configs: Configs)(implicit executor: ExecutionContext) {
      * @return
      */
     override def callFails(): Unit = {
-      counters.markFailure()
+      metrics.markFailure()
 
-      val snapshot = counters.getMetricSnapshot
+      val snapshot = metrics.getMetricSnapshot
       if ((snapshot.totalCount >= configs.requestVolumeThreshold.getOrElse(-1L))
         && (snapshot.errorPercentage >= configs.errorPercentageThreshold)) {
         tripBreaker(Closed)
@@ -379,7 +375,7 @@ class CircuitBreaker(configs: Configs)(implicit executor: ExecutionContext) {
      *
      * @return
      */
-    override def _enter(): Unit = counters.reset()
+    override def _enter(): Unit = metrics.reset()
 
     /**
      * Override for more descriptive toString
