@@ -4,22 +4,24 @@ import java.util.concurrent.atomic.AtomicLong
 
 import cb.CircuitBreakerMetrics.MetricSnapshot
 
+import scala.concurrent.duration.FiniteDuration
+
 /**
  * Encapsulates circuit breaker-specific metrics with a rolling window counter.
  * Measures the number of successes and failures over a configurable time period.
  *
  * @param snapshotInterval Determines maximum age of a cached snapshot
- * @param bucketWindowInterval Bucket window size in milliseconds.
+ * @param bucketWindowInterval Bucket window size
  * @param numberOfBuckets Number of active buckets within a rolling window.
  */
-class CircuitBreakerMetrics(snapshotInterval: Long, 
-                            bucketWindowInterval: Int, 
+class CircuitBreakerMetrics(snapshotInterval: FiniteDuration,
+                            bucketWindowInterval: FiniteDuration,
                             numberOfBuckets: Int) {
 
   private val lastSnapshotTimestamp = new AtomicLong(System.currentTimeMillis())
   @volatile private var lastSnapshot = MetricSnapshot(0, 0, 0)
 
-  private val counter = new RollingNumber(bucketWindowInterval, numberOfBuckets)
+  private val counter = new RollingNumber(bucketWindowInterval.toMillis.toInt, numberOfBuckets)
 
   /**
    * Records a single success event.
@@ -37,7 +39,7 @@ class CircuitBreakerMetrics(snapshotInterval: Long,
   def getMetricSnapshot: MetricSnapshot = {
     val lastTime: Long = lastSnapshotTimestamp.get
     val currentTime: Long = System.currentTimeMillis
-    if (currentTime - lastTime >= snapshotInterval) {
+    if (currentTime - lastTime >= snapshotInterval.toMillis) {
       if (lastSnapshotTimestamp.compareAndSet(lastTime, currentTime)) {
         val success: Long = counter.getRollingSum(RollingNumberEvent.SUCCESS)
         val failure: Long = counter.getRollingSum(RollingNumberEvent.FAILURE)

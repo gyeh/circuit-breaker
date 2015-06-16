@@ -21,8 +21,8 @@ import scala.util.Success
 object CircuitBreaker {
 
   /**
-   * @param callTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to consider a call a failure
-   * @param resetTimeout [[scala.concurrent.duration.FiniteDuration]] of time after which to attempt to close the circuit
+   * @param callTimeout Time after which to consider a call a failure
+   * @param resetTimeout Time after which to attempt to close the circuit
    * @param errorPercentageThreshold Error threshold to trigger an open circuit-breaker
    * @param requestVolumeThreshold Request volume prequisite to trigger an open circuit-breaker
    * @param snapshotInterval Determines maximum age of a cached snapshot
@@ -33,8 +33,8 @@ object CircuitBreaker {
                      resetTimeout: FiniteDuration,
                      errorPercentageThreshold: Int = 90,
                      requestVolumeThreshold: Option[Long] = None,
-                     snapshotInterval: Long,
-                     bucketWindowInterval: Int,
+                     snapshotInterval: FiniteDuration,
+                     bucketWindowInterval: FiniteDuration,
                      numberOfBuckets: Int = 10)
 
   private val cache = new ConcurrentHashMap[String, CircuitBreaker]()
@@ -49,8 +49,7 @@ object CircuitBreaker {
    * @param name Unique key of circuit-breaker
    * @param configs Circuit-breaker configs
    */
-  def apply(name: String,
-            configs: Configs): CircuitBreaker = {
+  def apply(name: String, configs: Configs)(implicit executor: ExecutionContext): CircuitBreaker = {
     val prevBreaker = cache.get(name)
     if (prevBreaker != null) {
       prevBreaker
@@ -88,7 +87,6 @@ class CircuitBreaker(configs: Configs)(implicit executor: ExecutionContext) {
   /**
    * Holds reference to current state of CircuitBreaker - *access only via helper methods*
    */
-  @volatile
   private[this] val state: AtomicReference[State] = new AtomicReference[State](Closed)
 
   /**
